@@ -3,5 +3,6 @@ uvicorn
 gunicorn
 pandas
 openpyxl
+python-calamine
 python-multipart
 numpy

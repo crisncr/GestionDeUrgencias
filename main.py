@@ -4,11 +4,12 @@ from fastapi.staticfiles import StaticFiles
 import pandas as pd
 import io
 import os
+import gc
 from typing import List, Optional
 import numpy as np
 import logging
 
-# Registro de actividad para ver qué pasa en el servidor de Render
+# Registro de actividad
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -32,17 +33,26 @@ def health():
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
     global CURRENT_DF
-    logger.info(f"--- NUEVA SUBIDA DETECTADA: {file.filename} ---")
+    logger.info(f"--- SUBIDA: {file.filename} ---")
     
     try:
-        # LECTURA DIRECTA: No guardamos archivos en el disco, usamos la memoria (RAM)
-        # Esto es mucho más rápido en servidores como Render
+        # 1. Leer contenido
         content = await file.read()
-        logger.info("Archivo cargado en memoria. Procesando con Pandas...")
+        logger.info(f"Tamaño del archivo: {len(content) / 1024 / 1024:.2f} MB")
         
-        df = pd.read_excel(io.BytesIO(content), engine='openpyxl')
+        # 2. Leer con motor optimizado (Calamine es mucho más ligero que Openpyxl)
+        # Usamos engine='calamine' si está disponible, o el estándar con optimización
+        try:
+            df = pd.read_excel(io.BytesIO(content), engine='calamine')
+        except:
+            logger.info("Calamine no disponible o falló, usando openpyxl...")
+            df = pd.read_excel(io.BytesIO(content), engine='openpyxl')
         
-        # Limpieza de columnas
+        # 3. Liberar la memoria del contenido original inmediatamente
+        del content
+        gc.collect()
+        
+        # 4. Procesar columnas
         df.columns = [str(c).strip() for c in df.columns]
         cols_map = {c.upper(): c for c in df.columns}
         if 'HOSPITAL' in cols_map: df.rename(columns={cols_map['HOSPITAL']: 'HOSPITAL'}, inplace=True)
@@ -50,23 +60,25 @@ async def upload_file(file: UploadFile = File(...)):
         if 'MES' in cols_map: df.rename(columns={cols_map['MES']: 'MES'}, inplace=True)
 
         if not {'HOSPITAL', 'AÑO', 'MES'}.issubset(df.columns):
-            logger.error("Faltan columnas esenciales: HOSPITAL, AÑO o MES")
             return {"error": "El Excel debe tener las columnas: HOSPITAL, AÑO y MES"}
         
-        df['HOSPITAL'] = df['HOSPITAL'].astype(str).str.strip()
+        # 5. Optimizar tipos de datos para ahorrar RAM
+        df['HOSPITAL'] = df['HOSPITAL'].astype('category')
+        if 'AÑO' in df.columns: df['AÑO'] = pd.to_numeric(df['AÑO'], downcast='integer')
+        if 'MES' in df.columns: df['MES'] = pd.to_numeric(df['MES'], downcast='integer')
+        
         CURRENT_DF = df
         
-        hospitals = sorted([h for h in df['HOSPITAL'].unique() if pd.notnull(h) and str(h).lower() != 'nan'])
+        hospitals = sorted(df['HOSPITAL'].unique().tolist())
         years = sorted([int(y) for y in df['AÑO'].unique() if pd.notnull(y)])
         
-        # Detectar indicadores numéricos
         indicators = []
         for col in df.columns:
             if col.upper() not in {'HOSPITAL', 'AÑO', 'MES', 'COD_HOSPITAL', 'ID'}:
-                if pd.to_numeric(df[col], errors='coerce').notnull().any():
+                if pd.api.types.is_numeric_dtype(df[col]):
                     indicators.append(col)
         
-        logger.info(f"PROCESO COMPLETADO: {len(hospitals)} hospitales detectados.")
+        logger.info(f"Carga exitosa: {len(hospitals)} hospitales.")
         return {
             "hospitals": hospitals,
             "years": years,
@@ -74,8 +86,8 @@ async def upload_file(file: UploadFile = File(...)):
         }
         
     except Exception as e:
-        logger.error(f"ERROR CRÍTICO: {str(e)}")
-        return {"error": f"No se pudo procesar el Excel: {str(e)}"}
+        logger.error(f"ERROR: {str(e)}")
+        return {"error": f"Error de memoria: {str(e)}. Intenta con un archivo más pequeño."}
 
 @app.get("/api/analysis")
 async def get_analysis(
@@ -86,10 +98,9 @@ async def get_analysis(
 ):
     global CURRENT_DF
     if CURRENT_DF is None:
-        return {"error": "Sube el archivo Excel primero"}
+        return {"error": "Sube el archivo primero"}
     
     try:
-        # Filtrado veloz
         mask = (CURRENT_DF['HOSPITAL'].astype(str) == str(hospital)) & (CURRENT_DF['AÑO'].astype(float) == float(year))
         if month:
             mask = mask & (CURRENT_DF['MES'].astype(float) == float(month))
@@ -98,7 +109,6 @@ async def get_analysis(
         if filtered.empty:
             return {"indicators": {}, "monthly_breakdown": []}
 
-        # Cálculos de indicadores
         results = {}
         for col in indicators:
             if col in filtered.columns:
@@ -111,10 +121,8 @@ async def get_analysis(
                         'mode': round(float(vals.mode().iloc[0]), 2) if not vals.mode().empty else 0
                     }
 
-        # Desglose mensual
         monthly_breakdown = []
-        all_months = sorted(filtered['MES'].unique())
-        for m in all_months:
+        for m in sorted(filtered['MES'].unique()):
             m_df = filtered[filtered['MES'] == m]
             m_stats = {}
             m_peaks = {}
@@ -130,13 +138,11 @@ async def get_analysis(
         
         return {"indicators": results, "monthly_breakdown": monthly_breakdown}
     except Exception as e:
-        logger.error(f"ERROR EN ANÁLISIS: {str(e)}")
+        logger.error(f"ERROR: {str(e)}")
         return {"error": str(e)}
 
-# Montaje de archivos estáticos (Interfaz)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
