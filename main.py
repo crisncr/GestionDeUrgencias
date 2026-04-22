@@ -58,8 +58,10 @@ async def upload_file(file: UploadFile = File(...)):
         
         indicators = []
         for col in df.columns:
-            if col.upper() not in {'HOSPITAL', 'AÑO', 'MES', 'COD_HOSPITAL', 'ID', 'COD_HOSP'}:
-                if pd.api.types.is_numeric_dtype(df[col]):
+            if col.upper() not in {'HOSPITAL', 'AÑO', 'MES', 'COD_HOSPITAL', 'ID', 'COD_HOSP', 'COD_HOSPITAL_DEIS', 'REGION', 'ESTABLECIMIENTO'}:
+                # Intentar convertir a numérico para ver si es una métrica
+                temp_vals = pd.to_numeric(df[col].iloc[:100], errors='coerce').dropna()
+                if not temp_vals.empty or pd.api.types.is_numeric_dtype(df[col]):
                     indicators.append(col)
         
         return {"hospitals": hospitals, "years": years, "available_indicators": indicators}
