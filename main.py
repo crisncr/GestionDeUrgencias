@@ -79,6 +79,9 @@ async def get_analysis(
         mask = (CURRENT_DF['HOSPITAL'].astype(str) == str(hospital)) & (CURRENT_DF['AÑO'].astype(float) == float(year))
         if month: mask = mask & (CURRENT_DF['MES'].astype(float) == float(month))
         filtered = CURRENT_DF[mask].copy()
+        
+        logger.info(f"Analysis requested for {hospital}, {year}, {month}. Rows found: {len(filtered)}")
+        
         if filtered.empty: return {"indicators": {}, "monthly_breakdown": []}
 
         results = {}
